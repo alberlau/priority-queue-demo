@@ -6,10 +6,14 @@ import static org.junit.Assert.assertTrue;
 
 import java.io.ByteArrayOutputStream;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import javax.xml.bind.JAXBContext;
 import javax.xml.bind.JAXBException;
 import javax.xml.bind.Marshaller;
+import org.apache.camel.CamelContext;
+import org.apache.camel.builder.NotifyBuilder;
 import org.apache.commons.lang3.RandomUtils;
+import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -23,10 +27,11 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.junit4.SpringRunner;
 import pqd.bean.MyBean;
 import pqd.repository.MyBeanRepository;
+import pqd.route.Routes;
 
 @RunWith(SpringRunner.class)
 @SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT)
-public class MyRouteTest {
+public class RestRouteIntTest {
 
     private final int ITEMS_COUNT = 20;
 
@@ -36,8 +41,16 @@ public class MyRouteTest {
     @Autowired
     private MyBeanRepository myBeanRepository;
 
+    @Autowired
+    private CamelContext camelContext;
+
+    @Before
+    public void init() {
+        myBeanRepository.deleteAll();
+    }
+
     @Test
-    public void test() throws JAXBException {
+    public void testHappyPath() throws JAXBException {
         submitData(ITEMS_COUNT);
 
         List<MyBean> myBeans = myBeanRepository.findAll(new Sort(Direction.ASC, "timestamp"));
@@ -45,6 +58,15 @@ public class MyRouteTest {
         assertEquals(ITEMS_COUNT, myBeans.size());
 
         assertSavedByPriority(myBeans);
+    }
+
+    @Test
+    public void testWhenBatchOverflowAllMessagesDelivered() throws JAXBException {
+        submitData(ITEMS_COUNT + 5);
+
+        List<MyBean> myBeans = myBeanRepository.findAll(new Sort(Direction.ASC, "timestamp"));
+
+        assertEquals(ITEMS_COUNT + 5, myBeans.size());
     }
 
     private void assertSavedByPriority(List<MyBean> myBeans) {
@@ -61,12 +83,18 @@ public class MyRouteTest {
         JAXBContext jaxb = JAXBContext.newInstance(MyBean.class);
         Marshaller marshaller = jaxb.createMarshaller();
 
+        NotifyBuilder notifyBuilder = new NotifyBuilder(camelContext).wereSentTo(Routes.PERSIST_SERVICE.route())
+            .whenDone(count).create();
+
         for (int value = 0; value < count; value++) {
             MyBean myBean = createMyBean();
             String xml = convertToXml(marshaller, myBean);
             ResponseEntity<String> response = restTemplate.postForEntity("/camel/api/bean", xml, String.class);
-            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
         }
+        boolean done = notifyBuilder.matches(5, TimeUnit.SECONDS);
+
+        assertTrue(done);
     }
 
     private String convertToXml(Marshaller marshaller, MyBean myBean) throws JAXBException {
